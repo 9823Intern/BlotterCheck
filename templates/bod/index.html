@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Blotter Safety Check</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --panel-2: #273449;
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-2: #0ea5e9;
+      --danger: #f87171;
+      --danger-bg: #3b1d1d;
+      --ok: #34d399;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    .wrap { max-width: 1000px; margin: 0 auto; padding: 32px 20px 80px; }
+    h1 { font-size: 1.6rem; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 28px; font-size: 0.95rem; }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 22px;
+      margin-bottom: 20px;
+    }
+
+    .dropzone {
+      border: 2px dashed var(--border);
+      border-radius: 14px;
+      padding: 42px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      background: var(--panel-2);
+    }
+    .dropzone.drag { border-color: var(--accent); background: #1f3247; }
+    .dropzone .big { font-size: 1.1rem; font-weight: 600; }
+    .dropzone .small { color: var(--muted); font-size: 0.9rem; margin-top: 6px; }
+    .dropzone .file-name { color: var(--accent); font-weight: 600; margin-top: 10px; }
+
+    .divider {
+      display: flex; align-items: center; gap: 14px;
+      color: var(--muted); margin: 18px 0; font-size: 0.85rem;
+      text-transform: uppercase; letter-spacing: 0.08em;
+    }
+    .divider::before, .divider::after {
+      content: ""; flex: 1; height: 1px; background: var(--border);
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 150px;
+      resize: vertical;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--text);
+      padding: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.85rem;
+    }
+    textarea:focus { outline: none; border-color: var(--accent); }
+
+    .controls {
+      display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+      margin-top: 18px;
+    }
+    label.field { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 0.9rem; }
+    input[type="number"], input[type="text"] {
+      width: 80px; background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 8px; color: var(--text); padding: 7px 9px; font-size: 0.9rem;
+    }
+    input[type="text"] { width: 130px; }
+
+    button {
+      background: var(--accent-2);
+      color: #04121d;
+      border: none;
+      border-radius: 10px;
+      padding: 11px 22px;
+      font-size: 0.95rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+    button:hover { background: var(--accent); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.ghost {
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border); font-weight: 500;
+    }
+    button.ghost:hover { color: var(--text); border-color: var(--muted); }
+
+    .status { margin-top: 14px; font-size: 0.9rem; min-height: 1.2em; }
+    .status.err { color: var(--danger); white-space: pre-wrap; }
+    .status.ok { color: var(--ok); }
+
+    .summary {
+      display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 18px;
+    }
+    .stat {
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 12px; padding: 14px 18px; min-width: 140px;
+    }
+    .stat .n { font-size: 1.7rem; font-weight: 700; }
+    .stat .l { color: var(--muted); font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat.danger .n { color: var(--danger); }
+
+    .group-title { font-size: 1.05rem; font-weight: 700; margin: 22px 0 10px; }
+    .group-title.danger { color: var(--danger); }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 0.74rem; letter-spacing: 0.05em; }
+    tr.danger td { background: var(--danger-bg); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .badge {
+      display: inline-block; padding: 2px 8px; border-radius: 999px;
+      font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+    }
+    .badge.long { background: #134e4a; color: var(--ok); }
+    .badge.short { background: #4a1f2a; color: var(--danger); }
+    .badge.none { background: #334155; color: var(--muted); }
+    .badge.option { background: #4a3f1f; color: #fbbf24; }
+    .hidden { display: none; }
+    .empty { color: var(--ok); font-weight: 600; padding: 14px 0; }
+
+    .tabs {
+      display: flex; gap: 6px; margin-bottom: 22px;
+      border-bottom: 1px solid var(--border);
+    }
+    .tab {
+      background: transparent; color: var(--muted);
+      border: none; border-bottom: 2px solid transparent;
+      border-radius: 0; padding: 10px 16px; font-size: 0.95rem;
+      font-weight: 600; cursor: pointer;
+    }
+    .tab:hover { color: var(--text); background: transparent; }
+    .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Blotter Safety Check</h1>
+    <p id="sub" class="sub">Drag &amp; drop a blotter file or paste an Excel grid to run the trade-error check.</p>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="errors">Trade Errors</button>
+      <button class="tab" data-tab="crosses">Crossing Trades</button>
+      <button class="tab" data-tab="accounts">Fund / Broker / Account</button>
+    </div>
+
+    <div class="card">
+      <div id="dropzone" class="dropzone">
+        <div class="big">Drop blotter file here</div>
+        <div class="small">.xlsx, .xls, .xlsm or .csv &mdash; or click to browse</div>
+        <div id="fileName" class="file-name"></div>
+        <input id="fileInput" type="file" class="hidden" accept=".xlsx,.xls,.xlsm,.xlsb,.csv" />
+      </div>
+
+      <div class="divider">or paste an Excel grid</div>
+
+      <textarea id="pasteArea" placeholder="Copy cells in Excel and paste here (tab-separated)..."></textarea>
+
+      <div class="controls">
+        <label class="field">
+          Skip rows
+          <input id="skiprows" type="number" min="0" value="{{ default_skiprows }}" />
+        </label>
+        <button id="runBtn">Run check</button>
+        <button id="clearBtn" class="ghost">Clear</button>
+      </div>
+      <div id="status" class="status"></div>
+    </div>
+
+    <div id="results" class="card hidden">
+      <div id="summary" class="summary"></div>
+      <div id="resultBody"></div>
+    </div>
+  </div>
+
+  <script>
+    const dropzone = document.getElementById("dropzone");
+    const fileInput = document.getElementById("fileInput");
+    const fileName = document.getElementById("fileName");
+    const pasteArea = document.getElementById("pasteArea");
+    const skiprows = document.getElementById("skiprows");
+    const runBtn = document.getElementById("runBtn");
+    const clearBtn = document.getElementById("clearBtn");
+    const statusEl = document.getElementById("status");
+    const results = document.getElementById("results");
+    const summary = document.getElementById("summary");
+    const resultBody = document.getElementById("resultBody");
+    const subEl = document.getElementById("sub");
+    const tabs = document.querySelectorAll(".tab");
+
+    let selectedFile = null;
+    let activeTab = "errors";
+
+    const TAB_CONFIG = {
+      errors: {
+        endpoint: "/check",
+        sub: "Drag & drop a blotter file or paste an Excel grid to run the trade-error check.",
+        render: renderResults,
+        running: "Running check...",
+        button: "Run check",
+      },
+      crosses: {
+        endpoint: "/crosses",
+        sub: "Check that crossing trades net to zero shares per ticker. Drop a blotter file or paste an Excel grid.",
+        render: renderCrosses,
+        running: "Checking crossing trades...",
+        button: "Run check",
+      },
+      accounts: {
+        endpoint: "/accounts",
+        sub: "Check fund (col S), broker (col L) and account (col T) combinations on every blotter row. Drop a blotter file or paste an Excel grid.",
+        render: renderAccounts,
+        running: "Checking fund/broker/account combinations...",
+        button: "Run check",
+      },
+    };
+
+    function updateActiveTabUi() {
+      const cfg = TAB_CONFIG[activeTab];
+      subEl.textContent = cfg.sub;
+      runBtn.textContent = cfg.button;
+    }
+
+    tabs.forEach((tab) =>
+      tab.addEventListener("click", () => {
+        activeTab = tab.dataset.tab;
+        tabs.forEach((t) => t.classList.toggle("active", t === tab));
+        updateActiveTabUi();
+        results.classList.add("hidden");
+        setStatus("", "");
+      })
+    );
+    updateActiveTabUi();
+
+    function setFile(file) {
+      selectedFile = file;
+      fileName.textContent = file ? file.name : "";
+      if (file) pasteArea.value = "";
+    }
+
+    dropzone.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", (e) => {
+      if (e.target.files.length) setFile(e.target.files[0]);
+    });
+
+    ["dragenter", "dragover"].forEach((ev) =>
+      dropzone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        dropzone.classList.add("drag");
+      })
+    );
+    ["dragleave", "drop"].forEach((ev) =>
+      dropzone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        dropzone.classList.remove("drag");
+      })
+    );
+    dropzone.addEventListener("drop", (e) => {
+      if (e.dataTransfer.files.length) setFile(e.dataTransfer.files[0]);
+    });
+
+    pasteArea.addEventListener("input", () => {
+      if (pasteArea.value.trim()) setFile(null), (fileInput.value = "");
+    });
+
+    clearBtn.addEventListener("click", () => {
+      setFile(null);
+      fileInput.value = "";
+      pasteArea.value = "";
+      statusEl.textContent = "";
+      statusEl.className = "status";
+      results.classList.add("hidden");
+    });
+
+    function setStatus(msg, kind) {
+      statusEl.textContent = msg;
+      statusEl.className = "status" + (kind ? " " + kind : "");
+    }
+
+    function sideBadge(side) {
+      const s = (side || "None").toLowerCase();
+      const cls = s === "long" ? "long" : s === "short" ? "short" : "none";
+      return `<span class="badge ${cls}">${side || "None"}</span>`;
+    }
+
+    function optionBadge() {
+      return `<span class="badge option">Option</span>`;
+    }
+
+    function renderTable(rows, danger) {
+      if (!rows.length) return "";
+      const body = rows
+        .map(
+          (e) => `
+          <tr class="${danger ? "danger" : ""}">
+            <td class="mono">${e.line}</td>
+            <td class="mono">${e.Ticker ?? ""}</td>
+            <td class="mono">${e.Requested_Trade ?? ""}</td>
+            <td class="mono">${e["share count"] ?? ""}</td>
+            <td>${e.has_position ? sideBadge(e.holdings_side) + " " + (e.holdings_qty ?? "") : sideBadge(e.Position)}${e.is_option ? " " + optionBadge() : ""}</td>
+            <td>${e.reason ?? ""}</td>
+          </tr>`
+        )
+        .join("");
+      return `
+        <table>
+          <thead>
+            <tr><th>Line</th><th>Ticker</th><th>Trade</th><th>Shares</th><th>Holdings / Position</th><th>Reason</th></tr>
+          </thead>
+          <tbody>${body}</tbody>
+        </table>`;
+    }
+
+    function renderResults(data) {
+      results.classList.remove("hidden");
+      const s = data.summary;
+      summary.innerHTML = `
+        <div class="stat ${s.total ? "danger" : ""}"><div class="n">${s.total}</div><div class="l">Error trades</div></div>
+        <div class="stat"><div class="n">${s.with_position}</div><div class="l">With holdings</div></div>
+        <div class="stat"><div class="n">${s.without_position}</div><div class="l">Without holdings</div></div>`;
+
+      let html = `<div class="sub">Source: <span class="mono">${data.source}</span> &middot; skiprows=${data.skiprows}</div>`;
+      if (!s.total) {
+        html += `<div class="empty">No problematic trades detected.</div>`;
+      } else {
+        if (data.with_position.length) {
+          html += `<div class="group-title danger">Trades on tickers WITH a current position</div>`;
+          html += renderTable(data.with_position, true);
+        }
+        if (data.without_position.length) {
+          html += `<div class="group-title">Trades on tickers WITHOUT a current position</div>`;
+          html += renderTable(data.without_position, false);
+        }
+      }
+      resultBody.innerHTML = html;
+    }
+
+    function renderCrosses(data) {
+      results.classList.remove("hidden");
+      const s = data.summary;
+      summary.innerHTML = `
+        <div class="stat ${s.total ? "danger" : ""}"><div class="n">${s.total}</div><div class="l">Imbalanced tickers</div></div>`;
+
+      let html = `<div class="sub">Source: <span class="mono">${data.source}</span> &middot; skiprows=${data.skiprows}</div>`;
+      if (!s.total) {
+        html += `<div class="empty">All crossing trades net to zero per ticker.</div>`;
+      } else {
+        html += `<div class="group-title danger">Tickers whose crossing trades do NOT net to zero</div>`;
+        const body = data.imbalances
+          .map(
+            (e) => `
+            <tr class="danger">
+              <td class="mono">${e.Ticker ?? ""}</td>
+              <td class="mono">${e.net_shares}</td>
+              <td class="mono">${e.trade_count}</td>
+            </tr>`
+          )
+          .join("");
+        html += `
+          <table>
+            <thead>
+              <tr><th>Ticker</th><th>Net Shares</th><th>Crossing Trades</th></tr>
+            </thead>
+            <tbody>${body}</tbody>
+          </table>`;
+      }
+      resultBody.innerHTML = html;
+    }
+
+    function renderAccounts(data) {
+      results.classList.remove("hidden");
+      const s = data.summary;
+      summary.innerHTML = `
+        <div class="stat ${s.total ? "danger" : ""}"><div class="n">${s.total}</div><div class="l">Issues</div></div>`;
+
+      let html = `<div class="sub">Source: <span class="mono">${escapeHtml(data.source)}</span> &middot; skiprows=${escapeHtml(data.skiprows)}</div>`;
+      if (!s.total) {
+        html += `<div class="empty">All fund/broker/account combinations are valid.</div>`;
+      } else {
+        html += `<div class="group-title danger">Problematic fund/broker/account combinations</div>`;
+        const body = data.issues
+          .map(
+            (e) => `
+            <tr class="danger">
+              <td class="mono">${escapeHtml(e.ticker)}</td>
+              <td class="mono">${escapeHtml(e.fund)}</td>
+              <td class="mono">${escapeHtml(e.broker)}</td>
+              <td class="mono">${escapeHtml(e.account)}</td>
+              <td>${escapeHtml(e.issue)}</td>
+            </tr>`
+          )
+          .join("");
+        html += `
+          <table>
+            <thead>
+              <tr><th>Ticker</th><th>Fund (S)</th><th>Broker (L)</th><th>Account (T)</th><th>Issue</th></tr>
+            </thead>
+            <tbody>${body}</tbody>
+          </table>`;
+      }
+      resultBody.innerHTML = html;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    runBtn.addEventListener("click", async () => {
+      const pasted = pasteArea.value.trim();
+      if (!selectedFile && !pasted) {
+        setStatus("Drop a file or paste a grid first.", "err");
+        return;
+      }
+      const fd = new FormData();
+      fd.append("skiprows", skiprows.value || "0");
+      if (selectedFile) fd.append("file", selectedFile);
+      else fd.append("pasted", pasted);
+
+      const cfg = TAB_CONFIG[activeTab];
+      runBtn.disabled = true;
+      setStatus(cfg.running, "");
+      try {
+        const resp = await fetch(cfg.endpoint, { method: "POST", body: fd });
+        const data = await resp.json();
+        if (!data.ok) {
+          setStatus("Error: " + data.error, "err");
+          results.classList.add("hidden");
+        } else {
+          setStatus("Done.", "ok");
+          cfg.render(data);
+        }
+      } catch (err) {
+        setStatus("Request failed: " + err, "err");
+      } finally {
+        runBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

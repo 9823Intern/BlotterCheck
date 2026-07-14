@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Blotter Reconciliation</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --panel-2: #273449;
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-2: #0ea5e9;
+      --danger: #f87171;
+      --danger-bg: #3b1d1d;
+      --warn: #fbbf24;
+      --warn-bg: #3b321d;
+      --ok: #34d399;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 32px 20px 80px; }
+    h1 { font-size: 1.6rem; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 28px; font-size: 0.95rem; }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 22px;
+      margin-bottom: 20px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+    .source {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .source .title { font-weight: 700; font-size: 1rem; }
+    .source .title .tag {
+      font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--accent);
+      border: 1px solid var(--accent); border-radius: 999px;
+      padding: 1px 8px; margin-left: 8px; vertical-align: 2px;
+    }
+    .source .hint { color: var(--muted); font-size: 0.8rem; margin-top: -6px; }
+
+    .dropzone {
+      border: 2px dashed var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    .dropzone.drag { border-color: var(--accent); background: #1f3247; }
+    .dropzone .file-name { color: var(--accent); font-weight: 600; }
+    .dropzone.has-file { border-style: solid; border-color: var(--accent); }
+
+    textarea {
+      width: 100%;
+      min-height: 110px;
+      resize: vertical;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--text);
+      padding: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.78rem;
+    }
+    textarea:focus { outline: none; border-color: var(--accent); }
+    textarea.has-text { border-color: var(--ok); }
+
+    .controls {
+      display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+      margin-top: 18px;
+    }
+    label.field { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 0.9rem; }
+    input[type="number"] {
+      width: 90px; background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 8px; color: var(--text); padding: 7px 9px; font-size: 0.9rem;
+    }
+
+    button {
+      background: var(--accent-2);
+      color: #04121d;
+      border: none;
+      border-radius: 10px;
+      padding: 11px 22px;
+      font-size: 0.95rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+    button:hover { background: var(--accent); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.ghost {
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border); font-weight: 500;
+    }
+    button.ghost:hover { color: var(--text); border-color: var(--muted); }
+
+    .status { margin-top: 14px; font-size: 0.9rem; min-height: 1.2em; }
+    .status.err { color: var(--danger); white-space: pre-wrap; }
+    .status.ok { color: var(--ok); }
+
+    .summary { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 18px; }
+    .stat {
+      background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 12px; padding: 14px 18px; min-width: 130px;
+    }
+    .stat .n { font-size: 1.7rem; font-weight: 700; }
+    .stat .l { color: var(--muted); font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat.danger .n { color: var(--danger); }
+    .stat.warn .n { color: var(--warn); }
+    .stat.good .n { color: var(--ok); }
+
+    .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+    .chip {
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border); border-radius: 999px;
+      padding: 5px 14px; font-size: 0.82rem; font-weight: 600; cursor: pointer;
+    }
+    .chip.active { color: var(--accent); border-color: var(--accent); }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.05em; }
+    tr.sev-ERROR td { background: var(--danger-bg); }
+    tr.sev-WARN td { background: var(--warn-bg); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .badge {
+      display: inline-block; padding: 2px 8px; border-radius: 999px;
+      font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+    }
+    .badge.ERROR { background: #4a1f2a; color: var(--danger); }
+    .badge.WARN { background: #4a3f1f; color: var(--warn); }
+    .badge.src { background: #334155; color: var(--text); }
+    .hidden { display: none; }
+    .empty { color: var(--ok); font-weight: 600; padding: 14px 0; font-size: 1.05rem; }
+    .loaded-line { color: var(--muted); font-size: 0.85rem; margin-bottom: 14px; }
+    .loaded-line .mono { color: var(--text); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Blotter Reconciliation</h1>
+    <p class="sub">
+      Paste or drop all four end-of-day files. Every trade is normalized to
+      (ticker, side, quantity, price) and each source is diffed against the EMSX
+      grid, which is treated as authoritative.
+    </p>
+
+    <div class="card">
+      <div class="grid" id="sources"></div>
+
+      <div class="controls">
+        <label class="field">Qty tolerance (shares)
+          <input id="qtyTol" type="number" min="0" value="0" />
+        </label>
+        <label class="field">Price tolerance ($)
+          <input id="priceTol" type="number" min="0" step="0.01" value="0.01" />
+        </label>
+        <button id="runBtn">Run reconciliation</button>
+        <button id="clearBtn" class="ghost">Clear all</button>
+      </div>
+      <div id="status" class="status"></div>
+    </div>
+
+    <div id="results" class="card hidden">
+      <div id="summary" class="summary"></div>
+      <div id="loadedLine" class="loaded-line"></div>
+      <div id="filters" class="filters hidden"></div>
+      <div id="resultBody"></div>
+    </div>
+  </div>
+
+  <script>
+    const SOURCES = [
+      { key: "emsx", name: "EMSX Grid", tag: "authoritative",
+        hint: "Bloomberg EMSX export (.xlsx) or paste the grid including the header row (Side, Security, SEDOL, FillQty, AvgPx...).",
+        accept: ".xlsx,.xls,.xlsm,.xlsb,.csv" },
+      { key: "blotter", name: "Blotter EOD", tag: "",
+        hint: "Vantage BlotterEOD (.xlsx/.csv) or paste the whole sheet. Trade rows start with S / P / C.",
+        accept: ".xlsx,.xls,.xlsm,.xlsb,.csv" },
+      { key: "pcm", name: "PCMBlotter", tag: "",
+        hint: "PCMBlotter (.csv) or paste including the header row (Fund, Ticker, Transaction Type, Quantity...).",
+        accept: ".csv,.xlsx,.xls" },
+      { key: "tradefile", name: "Goldman Tradefile", tag: "",
+        hint: "tradefile.nine82 (.csv) or paste the pipe-delimited HEADER/ORDER/ALLOCAT/TRAILER rows.",
+        accept: ".csv,.txt" },
+    ];
+
+    const state = {};   // key -> { file: File|null }
+    const sourcesEl = document.getElementById("sources");
+
+    for (const src of SOURCES) {
+      state[src.key] = { file: null };
+      const div = document.createElement("div");
+      div.className = "source";
+      div.innerHTML = `
+        <div class="title">${src.name}${src.tag ? `<span class="tag">${src.tag}</span>` : ""}</div>
+        <div class="hint">${src.hint}</div>
+        <div class="dropzone" id="${src.key}-drop">
+          Drop file / click to browse <span class="file-name" id="${src.key}-fname"></span>
+          <input type="file" class="hidden" id="${src.key}-file" accept="${src.accept}" />
+        </div>
+        <textarea id="${src.key}-text" placeholder="...or paste ${src.name} contents here"></textarea>
+      `;
+      sourcesEl.appendChild(div);
+    }
+
+    for (const src of SOURCES) {
+      const drop = document.getElementById(`${src.key}-drop`);
+      const input = document.getElementById(`${src.key}-file`);
+      const fname = document.getElementById(`${src.key}-fname`);
+      const text = document.getElementById(`${src.key}-text`);
+
+      const setFile = (file) => {
+        state[src.key].file = file;
+        fname.textContent = file ? file.name : "";
+        drop.classList.toggle("has-file", !!file);
+        if (file) { text.value = ""; text.classList.remove("has-text"); }
+      };
+
+      drop.addEventListener("click", () => input.click());
+      input.addEventListener("change", (e) => { if (e.target.files.length) setFile(e.target.files[0]); });
+      ["dragenter", "dragover"].forEach((ev) =>
+        drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("drag"); }));
+      ["dragleave", "drop"].forEach((ev) =>
+        drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("drag"); }));
+      drop.addEventListener("drop", (e) => { if (e.dataTransfer.files.length) setFile(e.dataTransfer.files[0]); });
+
+      text.addEventListener("input", () => {
+        text.classList.toggle("has-text", !!text.value.trim());
+        if (text.value.trim()) { setFile(null); input.value = ""; }
+      });
+    }
+
+    const runBtn = document.getElementById("runBtn");
+    const clearBtn = document.getElementById("clearBtn");
+    const statusEl = document.getElementById("status");
+    const results = document.getElementById("results");
+    const summary = document.getElementById("summary");
+    const loadedLine = document.getElementById("loadedLine");
+    const filtersEl = document.getElementById("filters");
+    const resultBody = document.getElementById("resultBody");
+
+    let allFindings = [];
+    let activeFilter = "ALL";
+
+    function setStatus(msg, kind) {
+      statusEl.textContent = msg;
+      statusEl.className = "status" + (kind ? " " + kind : "");
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+    }
+
+    clearBtn.addEventListener("click", () => {
+      for (const src of SOURCES) {
+        document.getElementById(`${src.key}-file`).value = "";
+        document.getElementById(`${src.key}-fname`).textContent = "";
+        document.getElementById(`${src.key}-drop`).classList.remove("has-file");
+        const t = document.getElementById(`${src.key}-text`);
+        t.value = ""; t.classList.remove("has-text");
+        state[src.key].file = null;
+      }
+      setStatus("", "");
+      results.classList.add("hidden");
+    });
+
+    function renderFilters() {
+      const sources = ["ALL", ...new Set(allFindings.map((f) => f.source))];
+      filtersEl.classList.toggle("hidden", allFindings.length === 0);
+      filtersEl.innerHTML = sources
+        .map((s) => `<button class="chip ${s === activeFilter ? "active" : ""}" data-f="${escapeHtml(s)}">${escapeHtml(s)}</button>`)
+        .join("");
+      filtersEl.querySelectorAll(".chip").forEach((chip) =>
+        chip.addEventListener("click", () => { activeFilter = chip.dataset.f; renderFilters(); renderTable(); }));
+    }
+
+    function renderTable() {
+      const rows = activeFilter === "ALL" ? allFindings : allFindings.filter((f) => f.source === activeFilter);
+      if (!rows.length) {
+        resultBody.innerHTML = `<div class="empty">No diffs${activeFilter === "ALL" ? "" : " for " + escapeHtml(activeFilter)}. All sources reconcile against EMSX.</div>`;
+        return;
+      }
+      const body = rows.map((f) => `
+        <tr class="sev-${escapeHtml(f.severity)}">
+          <td><span class="badge ${escapeHtml(f.severity)}">${escapeHtml(f.severity)}</span></td>
+          <td><span class="badge src">${escapeHtml(f.source)}</span></td>
+          <td class="mono">${escapeHtml(f.check)}</td>
+          <td class="mono">${escapeHtml(f.ticker)}</td>
+          <td class="mono">${escapeHtml(f.side)}</td>
+          <td class="mono">${escapeHtml(f.emsx_value)}</td>
+          <td class="mono">${escapeHtml(f.source_value)}</td>
+          <td>${escapeHtml(f.detail)}</td>
+        </tr>`).join("");
+      resultBody.innerHTML = `
+        <table>
+          <thead>
+            <tr><th></th><th>Source</th><th>Check</th><th>Ticker</th><th>Side</th><th>EMSX</th><th>Source Value</th><th>Detail</th></tr>
+          </thead>
+          <tbody>${body}</tbody>
+        </table>`;
+    }
+
+    function renderResults(data) {
+      results.classList.remove("hidden");
+      allFindings = data.findings;
+      activeFilter = "ALL";
+
+      const s = data.summary;
+      summary.innerHTML = `
+        <div class="stat ${s.errors ? "danger" : "good"}"><div class="n">${s.errors}</div><div class="l">Errors</div></div>
+        <div class="stat ${s.warnings ? "warn" : ""}"><div class="n">${s.warnings}</div><div class="l">Warnings</div></div>`;
+
+      loadedLine.innerHTML = Object.entries(data.sources)
+        .map(([k, v]) => `${escapeHtml(k)}: <span class="mono">${v.rows} rows</span> (${escapeHtml(v.origin)})`)
+        .join(" &middot; ");
+
+      renderFilters();
+      renderTable();
+    }
+
+    runBtn.addEventListener("click", async () => {
+      const fd = new FormData();
+      for (const src of SOURCES) {
+        const file = state[src.key].file;
+        // Send the textarea value untrimmed: a leading tab means an empty
+        // first cell and trimming it would shift every column.
+        const text = document.getElementById(`${src.key}-text`).value;
+        if (!file && !text.trim()) {
+          setStatus(`Provide the ${src.name} (file or paste) first.`, "err");
+          return;
+        }
+        if (file) fd.append(`${src.key}_file`, file);
+        else fd.append(`${src.key}_text`, text);
+      }
+      fd.append("qty_tol", document.getElementById("qtyTol").value || "0");
+      fd.append("price_tol", document.getElementById("priceTol").value || "0.01");
+
+      runBtn.disabled = true;
+      setStatus("Running reconciliation...", "");
+      try {
+        const resp = await fetch("/check", { method: "POST", body: fd });
+        const data = await resp.json();
+        if (!data.ok) {
+          setStatus("Error: " + data.error, "err");
+          results.classList.add("hidden");
+        } else {
+          setStatus("Done.", "ok");
+          renderResults(data);
+        }
+      } catch (err) {
+        setStatus("Request failed: " + err, "err");
+      } finally {
+        runBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
