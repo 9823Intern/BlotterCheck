@@ -1,8 +1,13 @@
-"""Web frontend for the four-way end-of-day blotter reconciliation.
+"""Web frontend for the four-step end-of-day blotter reconciliation.
 
 Each of the four sources (EMSX grid, Blotter EOD, PCMBlotter, Goldman tradefile)
-can be provided as an uploaded file or pasted text. The reconciliation from
-``blotter_check`` runs and all diffs are returned to the browser.
+can be provided as an uploaded file or pasted text. The workflow from
+``blotter_check`` runs and all findings are returned to the browser:
+
+    Step 1: EMSX (GSPT/PREX/GSOP) vs Goldman tradefile
+    Step 2: EMSX (excluding TDAI) vs PCMBlotter
+    Step 3: PCM (GSPT/PREX/GSOP)  vs Goldman tradefile
+    Step 4: Blotter EOD adjudication of remaining discrepancies
 
 Run with::
 
@@ -20,7 +25,13 @@ from flask import Flask, jsonify, render_template, request
 import blotter_check as bc
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB upload cap
+# This is a localhost-only tool whose inputs can be large pasted exports.
+# Disable Flask/Werkzeug's request and multipart parser limits.
+app.config.update(
+    MAX_CONTENT_LENGTH=None,
+    MAX_FORM_MEMORY_SIZE=None,
+    MAX_FORM_PARTS=None,
+)
 
 SOURCES = {
     "emsx": (bc.load_emsx_bytes, bc.load_emsx_text, "EMSX grid"),
@@ -104,6 +115,7 @@ def check():
         "summary": {
             "errors": int((report["severity"] == "ERROR").sum()),
             "warnings": int((report["severity"] == "WARN").sum()),
+            "resolved": int((report["severity"] == "RESOLVED").sum()),
         },
         "findings": report.to_dict(orient="records"),
     })

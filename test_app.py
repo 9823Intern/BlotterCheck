@@ -1,11 +1,9 @@
-"""Exercise the /check endpoint with the sample files, both as uploads and pastes."""
-import io
+"""Exercise the /check endpoint with synthetic pasted inputs for all four sources."""
+
 import sys
 
-import pandas as pd
-from openpyxl import load_workbook
-
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 from eod import app
 
 client = app.test_client()
@@ -18,60 +16,89 @@ def post(data):
     return resp.status_code, body
 
 
-def file_part(path):
-    return (open(path, "rb"), path.split("/")[-1])
+# --- Synthetic pasted grids ---------------------------------------------------
+# AAPL BUY 100 @ 104 (GSPT) appears in all four sources; MSFT SELL 50 (TDAI)
+# is in EMSX only and is excluded from every comparison scope.
+EMSX_HEADER = ["Security", "SEDOL", "Side", "Status", "FillQty", "AvgPx", "Def Brkr Code", "Qty"]
+emsx_text = "\n".join("\t".join(str(c) for c in row) for row in [
+    EMSX_HEADER,
+    ["AAPL", "2046251", "Buy", "Filled", 100, 104.0, "GSPT", 100],
+    ["MSFT", "2588173", "Sell", "Filled", 50, 300.0, "TDAI", 50],
+    ["NVDA", "2379504", "Buy", "Working", 7, 150.0, "GSPT", 7],  # not Filled: ignored
+])
 
 
-# --- Case 1: all four as file uploads -------------------------------------
-code, body = post({
-    "emsx_file": file_part("samples/grid.xlsx"),
-    "blotter_file": file_part("samples/BlotterEOD07.10.26.xlsx"),
-    "pcm_file": file_part("samples/PCMBlotter 2026-07-10.csv"),
-    "tradefile_file": file_part("samples/tradefile.nine82.20260710045714.csv"),
-})
-print("uploads:", code, body["ok"], body.get("summary"))
-assert code == 200 and body["ok"] and body["summary"]["errors"] == 0, body
+def blotter_row(side_code, ticker, qty, price, broker, fund="F1"):
+    cells = [""] * 19
+    cells[0] = "S"
+    cells[2] = side_code
+    cells[3] = ticker
+    cells[4] = str(qty)
+    cells[8] = str(qty)
+    cells[9] = str(price)
+    cells[11] = broker
+    cells[18] = fund
+    return "\t".join(cells)
 
-# --- Case 2: all four as pasted text ---------------------------------------
-# EMSX and blotter pasted as tab-separated grids (like copying cells in Excel).
-wb = load_workbook("samples/grid.xlsx", read_only=True, data_only=True)
-ws = wb[wb.sheetnames[0]]
-emsx_text = "\n".join(
-    "\t".join("" if c is None else str(c) for c in row)
-    for row in ws.iter_rows(values_only=True)
-)
-wb.close()
 
-blotter_df = pd.read_excel("samples/BlotterEOD07.10.26.xlsx", header=None)
-blotter_text = blotter_df.to_csv(sep="\t", index=False, header=False)
+blotter_text = blotter_row("bl", "AAPL", 100, 104.0, "GSPT")
 
-pcm_text = open("samples/PCMBlotter 2026-07-10.csv", encoding="utf-8", errors="replace").read()
-tradefile_text = open("samples/tradefile.nine82.20260710045714.csv").read()
+pcm_text = "\n".join([
+    "Fund,Ticker,Transaction Type,Quantity,Price,Broker",
+    "F1,AAPL,Buy,100,104.00,GSPT",
+])
 
+tradefile_text = "\n".join([
+    "HEADER|1",
+    "ORDER||O1|20260715|||B|||2046251|||||GSPT|||104.0000|100|",
+    "ALLOCAT||065465783|100",
+    "TRAILER|2",
+])
+
+# --- Case 1: consistent pastes reconcile cleanly ------------------------------
 code, body = post({
     "emsx_text": emsx_text,
     "blotter_text": blotter_text,
     "pcm_text": pcm_text,
     "tradefile_text": tradefile_text,
 })
-print("pastes:", code, body["ok"], body.get("summary"), body.get("error", ""))
-assert code == 200 and body["ok"] and body["summary"]["errors"] == 0, body
+print("clean:", code, body.get("summary"), body.get("error", ""))
+assert code == 200 and body["ok"], body
+assert body["summary"] == {"errors": 0, "warnings": 0, "resolved": 0}, body["summary"]
+assert body["sources"]["emsx"]["rows"] == 2, body["sources"]  # Working row dropped
 
-# --- Case 3: tampered paste shows diffs -------------------------------------
-tampered = tradefile_text.replace("|156.4000|6|", "|156.4000|9|")  # qty 6 -> 9
+# --- Case 2: tampered tradefile shows step findings ---------------------------
+tampered = tradefile_text.replace("|104.0000|100|", "|104.0000|90|").replace(
+    "ALLOCAT||065465783|100", "ALLOCAT||065465783|90")
 code, body = post({
     "emsx_text": emsx_text,
     "blotter_text": blotter_text,
     "pcm_text": pcm_text,
     "tradefile_text": tampered,
 })
-print("tampered:", code, body["ok"], body.get("summary"))
-findings = body["findings"]
-checks = {(f["check"], f["ticker"]) for f in findings}
-print("findings:", checks)
-assert body["summary"]["errors"] >= 2, body["summary"]  # alloc sum + qty/net mismatch
+print("tampered:", code, body.get("summary"))
+assert code == 200 and body["ok"] and body["summary"]["errors"] >= 2, body["summary"]
+steps = {f["step"] for f in body["findings"] if f["severity"] == "ERROR"}
+assert {"Step 1", "Step 3"} <= steps, steps
+assert all("left_value" in f and "right_value" in f for f in body["findings"])
 
-# --- Case 4: missing source rejected ----------------------------------------
+# --- Case 3: blotter-resolved side classification ------------------------------
+pcm_cover_as_buy = pcm_text  # PCM says BUY
+emsx_cover = emsx_text.replace("AAPL\t2046251\tBuy\tFilled", "AAPL\t2046251\tBuy to Cover\tFilled")
+trade_cover = tradefile_text.replace("|B|", "|BC|")
+blotter_cover = blotter_row("cs", "AAPL", 100, 104.0, "GSPT")  # corroborates COVER
+code, body = post({
+    "emsx_text": emsx_cover,
+    "blotter_text": blotter_cover,
+    "pcm_text": pcm_cover_as_buy,
+    "tradefile_text": trade_cover,
+})
+print("resolved:", code, body.get("summary"))
+assert code == 200 and body["ok"], body
+assert body["summary"]["errors"] == 0, body["findings"]
+assert body["summary"]["resolved"] >= 1, body["summary"]
+
+# --- Case 4: missing source rejected -------------------------------------------
 code, body = post({"emsx_text": emsx_text})
 print("missing source:", code, body.get("error"))
 assert code == 400 and not body["ok"]

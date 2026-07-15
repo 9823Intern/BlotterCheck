@@ -1,23 +1,29 @@
 """Blotter safety check: reconcile four end-of-day trade files against each other.
 
-Sources (EMSX is authoritative):
+Sources:
     1. EMSX grid export (.xlsx)         -- ticker + SEDOL, fills, avg price
     2. Vantage Blotter EOD (.xlsx/.csv) -- S/P/C rows, bl/sl/ss/cs type codes
     3. PCMBlotter (.csv)                -- Cascade-style, accounting negatives
     4. Goldman tradefile (.csv)         -- pipe-delimited ORDER/ALLOCAT, SEDOL-keyed
 
 Every trade is normalized to (ticker, side, quantity, price) where side is one of
-BUY (bl), SELL (sl), SHORT (ss), COVER (cs). Each non-authoritative source is
-compared to EMSX per (ticker, side) and per net ticker quantity. Differences are
-flagged and written to a findings CSV.
+BUY (bl), SELL (sl), SHORT (ss), COVER (cs). Only EMSX rows with Status "Filled"
+are loaded. Buckets are aggregated per (ticker, side): summed quantity and
+quantity-weighted average price.
 
-Comparison scopes:
-  - Blotter and PCM cover all executed trades, but internal fund-to-fund crosses
-    (broker CROS) never route through EMSX, so cross rows are excluded from the
-    EMSX comparison and instead checked to net to zero per ticker.
-  - The Goldman tradefile only carries Goldman-custodied trades, so it is
-    compared against EMSX filtered to brokers GSPT/GSCO/PREX (configurable via
-    --goldman-brokers). CFR/Cantor executions are out of its scope.
+Workflow (all comparisons bidirectional; a bucket present on one side but not the
+other is a discrepancy):
+  Step 1: EMSX filtered to brokers GSPT/PREX/GSOP  vs  Goldman tradefile.
+  Step 2: EMSX excluding broker TDAI               vs  PCMBlotter.
+  Step 3: PCM filtered to brokers GSPT/PREX/GSOP   vs  Goldman tradefile.
+  Step 4: Blotter EOD adjudication. Discrepancies from steps 1-3 that are pure
+          side-classification disagreements (net signed quantity per ticker still
+          matches) are resolved to INFO when the Blotter EOD corroborates one
+          side. Missing/extra trades that change net quantity remain errors.
+
+Internal fund-to-fund crosses (broker CROS) never route through EMSX; they are
+split out of the Blotter/PCM frames, checked to net flat per ticker, and their
+volume compared between the two sources.
 
 SEDOL -> ticker resolution order for the tradefile:
     1. EMSX file itself (has both identifiers)
@@ -64,8 +70,10 @@ TRADEFILE_SIDE_MAP = {"B": "BUY", "S": "SELL", "SS": "SHORT", "BC": "COVER"}
 
 TRADEFILE_ACCOUNT_NAMES = {"065465783": "gs-top", "065448128": "gs-wsf"}
 
-# Brokers whose executions flow into the Goldman tradefile. CFR (Cantor) does not.
-DEFAULT_GOLDMAN_BROKERS = {"GSPT", "GSCO", "PREX"}
+# Goldman-custodied broker codes (EMSX column G / PCM broker column).
+DEFAULT_GOLDMAN_BROKERS = {"GSPT", "GSOP", "PREX"}
+# EMSX brokers excluded from the PCM comparison (step 2).
+EMSX_PCM_EXCLUDED_BROKERS = {"TDAI"}
 # Internal fund-to-fund crosses; never routed through EMSX.
 CROSS_BROKER = "CROS"
 
@@ -78,26 +86,28 @@ class Findings:
     def __init__(self):
         self.rows = []
 
-    def add(self, severity, source, check, ticker="", side="", emsx_value="", source_value="", detail=""):
+    def add(self, severity, source, check, ticker="", side="", left_value="", right_value="",
+            detail="", step="Load"):
         self.rows.append({
             "severity": severity,
+            "step": step,
             "source": source,
             "check": check,
             "ticker": ticker,
             "side": side,
-            "emsx_value": emsx_value,
-            "source_value": source_value,
+            "left_value": left_value,
+            "right_value": right_value,
             "detail": detail,
         })
 
     def to_frame(self):
         df = pd.DataFrame(self.rows, columns=[
-            "severity", "source", "check", "ticker", "side",
-            "emsx_value", "source_value", "detail",
+            "severity", "step", "source", "check", "ticker", "side",
+            "left_value", "right_value", "detail",
         ])
-        order = {"ERROR": 0, "WARN": 1, "INFO": 2}
+        order = {"ERROR": 0, "WARN": 1, "RESOLVED": 2, "INFO": 3}
         return df.sort_values(
-            by=["severity", "source", "ticker"],
+            by=["severity", "step", "source", "ticker"],
             key=lambda s: s.map(order) if s.name == "severity" else s,
         ).reset_index(drop=True)
 
@@ -159,6 +169,9 @@ def _named_table(df, needle):
 def _emsx_from_table(raw, findings):
     df = _named_table(raw, "Security")
     df = df[df["Security"].notna() & (df["Security"].astype(str).str.strip() != "")].copy()
+    df = df[
+        df["Status"].astype(str).str.strip().str.casefold().eq("filled")
+    ].copy()
 
     def map_side(value):
         side = EMSX_SIDE_MAP.get(str(value).strip().lower())
@@ -177,12 +190,12 @@ def _emsx_from_table(raw, findings):
         "ordered_qty": _num_series(df["Qty"]).fillna(0).astype(int),
     })
 
-    partial = out[(out["qty"] != out["ordered_qty"]) | (out["status"].str.lower() != "filled")]
+    partial = out[out["qty"] != out["ordered_qty"]]
     for _, r in partial.iterrows():
         findings.add(
             "WARN", "EMSX", "partial_or_unfilled", r["ticker"], r["side"] or "",
-            emsx_value=f"ordered {r['ordered_qty']}",
-            source_value=f"filled {r['qty']} ({r['status']})",
+            left_value=f"ordered {r['ordered_qty']}",
+            right_value=f"filled {r['qty']} ({r['status']})",
             detail="EMSX order not fully filled",
         )
 
@@ -318,7 +331,7 @@ def _pcm_from_table(raw, findings):
         expected_sign = SIDE_SIGN[side]
         if (signed_qty > 0) != (expected_sign > 0):
             findings.add("WARN", "PCM", "sign_mismatch", ticker, side,
-                         source_value=str(signed_qty),
+                         right_value=str(signed_qty),
                          detail="PCM quantity sign disagrees with its own transaction type")
         rows.append({
             "ticker": ticker,
@@ -398,15 +411,15 @@ def _tradefile_from_reader(reader, findings):
     n_rows = len(orders) + sum(len(a) for a in allocs_by_order.values())
     if trailer_count is not None and trailer_count != n_rows:
         findings.add("ERROR", "Tradefile", "trailer_count",
-                     source_value=str(n_rows), emsx_value=str(trailer_count),
+                     left_value=str(trailer_count), right_value=str(n_rows),
                      detail="Trailer row count does not match parsed ORDER+ALLOCAT rows")
 
     for order in orders:
         alloc_sum = sum(a["qty"] for a in allocs_by_order[order["order_id"]])
         if alloc_sum != order["qty"]:
             findings.add("ERROR", "Tradefile", "allocation_sum", "", order["side"] or "",
-                         emsx_value=f"order qty {order['qty']}",
-                         source_value=f"alloc sum {alloc_sum}",
+                         left_value=f"order qty {order['qty']}",
+                         right_value=f"alloc sum {alloc_sum}",
                          detail=f"Order {order['order_id']} (SEDOL {order['sedol']}) allocations do not sum to order quantity")
         unknown = [a["account"] for a in allocs_by_order[order["order_id"]] if a["account_name"] == "unknown"]
         if unknown:
@@ -522,53 +535,149 @@ def net_by_ticker(df):
     return signed.groupby(df["ticker"]).sum().astype(int)
 
 
-def compare_source(emsx_agg, src_df, source_name, findings, qty_tol, price_tol):
-    src_agg = aggregate(src_df)
-    merged = emsx_agg.merge(src_agg, on=["ticker", "side"], how="outer",
-                            suffixes=("_emsx", "_src"), indicator=True)
+def compare_pair(left_agg, right_agg, left_name, right_name, qty_tol, price_tol):
+    """Bidirectional comparison of two aggregated frames on (ticker, side).
 
-    emsx_net = net_by_ticker_from_agg(emsx_agg)
-    src_net = net_by_ticker_from_agg(src_agg)
+    Returns a list of discrepancy dicts. Each carries ``net_ok``: True when the
+    net signed quantity per ticker still agrees between the two sources, which
+    means the disagreement is a side-classification difference that step 4 may
+    resolve against the Blotter EOD. Discrepancies that change net quantity are
+    real missing/extra trades and always stay errors.
+    """
+    merged = left_agg.merge(right_agg, on=["ticker", "side"], how="outer",
+                            suffixes=("_l", "_r"), indicator=True)
+
+    left_net = net_by_ticker_from_agg(left_agg)
+    right_net = net_by_ticker_from_agg(right_agg)
+
+    discrepancies = []
+    net_error_tickers = set()
 
     for _, r in merged.iterrows():
         ticker, side = r["ticker"], r["side"]
-        net_ok = emsx_net.get(ticker, 0) == src_net.get(ticker, 0)
+        net_ok = left_net.get(ticker, 0) == right_net.get(ticker, 0)
 
         if r["_merge"] == "left_only":
-            sev = "WARN" if net_ok else "ERROR"
-            findings.add(sev, source_name, "missing_in_source", ticker, side,
-                         emsx_value=f"qty {int(r['qty_emsx'])}", source_value="absent",
-                         detail="In EMSX but not in this source"
-                                + (" (net qty still matches - likely side classification difference)" if net_ok else ""))
+            if not net_ok:
+                net_error_tickers.add(ticker)
+            discrepancies.append({
+                "check": "missing_bucket", "ticker": ticker, "side": side, "net_ok": net_ok,
+                "left_value": f"qty {int(r['qty_l'])}", "right_value": "absent",
+                "left_qty": int(r["qty_l"]), "right_qty": None,
+                "detail": f"In {left_name} but not in {right_name}",
+            })
         elif r["_merge"] == "right_only":
-            sev = "WARN" if net_ok else "ERROR"
-            findings.add(sev, source_name, "extra_in_source", ticker, side,
-                         emsx_value="absent", source_value=f"qty {int(r['qty_src'])}",
-                         detail="In this source but not in EMSX"
-                                + (" (net qty still matches - likely side classification difference)" if net_ok else ""))
+            if not net_ok:
+                net_error_tickers.add(ticker)
+            discrepancies.append({
+                "check": "extra_bucket", "ticker": ticker, "side": side, "net_ok": net_ok,
+                "left_value": "absent", "right_value": f"qty {int(r['qty_r'])}",
+                "left_qty": None, "right_qty": int(r["qty_r"]),
+                "detail": f"In {right_name} but not in {left_name}",
+            })
         else:
-            qty_diff = int(r["qty_src"]) - int(r["qty_emsx"])
+            qty_diff = int(r["qty_r"]) - int(r["qty_l"])
             if abs(qty_diff) > qty_tol:
-                sev = "WARN" if net_ok else "ERROR"
-                findings.add(sev, source_name, "qty_mismatch", ticker, side,
-                             emsx_value=str(int(r["qty_emsx"])), source_value=str(int(r["qty_src"])),
-                             detail=f"Quantity differs by {qty_diff:+d}"
-                                    + (" (net qty still matches)" if net_ok else ""))
-            px_e, px_s = r["wavg_price_emsx"], r["wavg_price_src"]
-            if pd.notna(px_e) and pd.notna(px_s) and px_s != 0:
-                if abs(px_s - px_e) > price_tol and abs(px_s - px_e) / px_e > 0.0005:
-                    findings.add("WARN", source_name, "price_mismatch", ticker, side,
-                                 emsx_value=f"{px_e:.4f}", source_value=f"{px_s:.4f}",
-                                 detail=f"Weighted-avg price differs by {px_s - px_e:+.4f}")
+                if not net_ok:
+                    net_error_tickers.add(ticker)
+                discrepancies.append({
+                    "check": "qty_mismatch", "ticker": ticker, "side": side, "net_ok": net_ok,
+                    "left_value": str(int(r["qty_l"])), "right_value": str(int(r["qty_r"])),
+                    "left_qty": int(r["qty_l"]), "right_qty": int(r["qty_r"]),
+                    "detail": f"Quantity differs by {qty_diff:+d} ({right_name} minus {left_name})",
+                })
+            px_l, px_r = r["wavg_price_l"], r["wavg_price_r"]
+            if pd.notna(px_l) and pd.notna(px_r) and px_r != 0 and px_l != 0:
+                if abs(px_r - px_l) > price_tol and abs(px_r - px_l) / px_l > 0.0005:
+                    discrepancies.append({
+                        "check": "price_mismatch", "ticker": ticker, "side": side, "net_ok": True,
+                        "left_value": f"{px_l:.4f}", "right_value": f"{px_r:.4f}",
+                        "left_qty": None, "right_qty": None, "price_only": True,
+                        "detail": f"Weighted-avg price differs by {px_r - px_l:+.4f}",
+                    })
 
-    # Net-quantity check per ticker (catches offsetting side-level errors)
-    all_tickers = set(emsx_net.index) | set(src_net.index)
-    for ticker in sorted(all_tickers):
-        e, s = emsx_net.get(ticker, 0), src_net.get(ticker, 0)
-        if e != s:
-            findings.add("ERROR", source_name, "net_qty_mismatch", ticker,
-                         emsx_value=str(e), source_value=str(s),
-                         detail=f"Net signed quantity differs by {s - e:+d}")
+    # One underlying discrepancy is counted once: the net-level check only fires
+    # for tickers with no bucket-level error already recorded above.
+    for ticker in sorted(set(left_net.index) | set(right_net.index)):
+        l, r = left_net.get(ticker, 0), right_net.get(ticker, 0)
+        if l != r and ticker not in net_error_tickers:
+            discrepancies.append({
+                "check": "net_qty_mismatch", "ticker": ticker, "side": "", "net_ok": False,
+                "left_value": str(l), "right_value": str(r),
+                "left_qty": None, "right_qty": None,
+                "detail": f"Net signed quantity differs by {r - l:+d} ({right_name} minus {left_name})",
+            })
+
+    return discrepancies
+
+
+def _ticker_side_maps(agg):
+    """{ticker: {side: qty}} from an aggregated frame."""
+    maps = {}
+    for _, r in agg.iterrows():
+        maps.setdefault(r["ticker"], {})[r["side"]] = int(r["qty"])
+    return maps
+
+
+def _maps_match(a, b, qty_tol):
+    return a is not None and b is not None and set(a) == set(b) and all(
+        abs(a[side] - b[side]) <= qty_tol for side in a
+    )
+
+
+def adjudicate_with_blotter(discrepancies, left_agg, right_agg, blotter_agg,
+                            left_name, right_name, step, findings, qty_tol):
+    """Step 4: settle side-classification discrepancies against the Blotter EOD.
+
+    A discrepancy is resolvable only when net quantity per ticker still matches
+    (pure side/classification disagreement). The blotter's per-ticker bucket
+    profile (side -> qty) is compared against each source's profile; when it
+    matches one source exactly, that source is corroborated and every net-ok
+    discrepancy for the ticker becomes RESOLVED as a single classification
+    difference. Real missing/extra trades (net quantity changed) always remain
+    errors, as do discrepancies the blotter cannot settle.
+    """
+    left_maps = _ticker_side_maps(left_agg)
+    right_maps = _ticker_side_maps(right_agg)
+    blotter_maps = _ticker_side_maps(blotter_agg)
+
+    source = f"{left_name} vs {right_name}"
+    for d in discrepancies:
+        if d.get("price_only"):
+            findings.add("WARN", source, d["check"], d["ticker"], d["side"],
+                         left_value=d["left_value"], right_value=d["right_value"],
+                         detail=d["detail"], step=step)
+            continue
+
+        if not d["net_ok"]:
+            findings.add("ERROR", source, d["check"], d["ticker"], d["side"],
+                         left_value=d["left_value"], right_value=d["right_value"],
+                         detail=d["detail"], step=step)
+            continue
+
+        ticker = d["ticker"]
+        blotter_map = blotter_maps.get(ticker)
+        if _maps_match(blotter_map, left_maps.get(ticker), qty_tol):
+            supported = left_name
+        elif _maps_match(blotter_map, right_maps.get(ticker), qty_tol):
+            supported = right_name
+        else:
+            supported = None
+
+        if supported:
+            shown = ", ".join(f"{s} {q}" for s, q in sorted(blotter_map.items()))
+            findings.add("RESOLVED", source, d["check"], ticker, d["side"],
+                         left_value=d["left_value"], right_value=d["right_value"],
+                         detail=d["detail"] + f". Resolved: Blotter EOD shows {ticker} "
+                                f"({shown}), corroborating {supported}; "
+                                "side classification difference.",
+                         step=step)
+        else:
+            findings.add("ERROR", source, d["check"], ticker, d["side"],
+                         left_value=d["left_value"], right_value=d["right_value"],
+                         detail=d["detail"] + ". Net quantity matches but the Blotter EOD "
+                                "does not corroborate either source.",
+                         step=step)
 
 
 def net_by_ticker_from_agg(agg):
@@ -586,8 +695,9 @@ def check_crosses(cross_df, source_name, findings):
     for ticker, n in net.items():
         if n != 0:
             findings.add("ERROR", source_name, "cross_not_flat", ticker,
-                         emsx_value="0", source_value=str(int(n)),
-                         detail="Internal cross (CROS) legs do not net to zero")
+                         left_value="0", right_value=str(int(n)),
+                         detail="Internal cross (CROS) legs do not net to zero",
+                         step="Crosses")
 
 
 def compare_crosses(blotter_x, pcm_x, findings):
@@ -603,8 +713,9 @@ def compare_crosses(blotter_x, pcm_x, findings):
         bq, pq = int(b.get(ticker, 0)), int(p.get(ticker, 0))
         if bq != pq:
             findings.add("ERROR", "PCM", "cross_qty_mismatch", ticker,
-                         emsx_value=f"blotter cross {bq}", source_value=f"pcm cross {pq}",
-                         detail="Internal cross volume differs between blotter and PCM")
+                         left_value=f"blotter cross {bq}", right_value=f"pcm cross {pq}",
+                         detail="Internal cross volume differs between blotter and PCM",
+                         step="Crosses")
 
 
 # ---------------------------------------------------------------------------
@@ -612,8 +723,18 @@ def compare_crosses(blotter_x, pcm_x, findings):
 # ---------------------------------------------------------------------------
 
 def reconcile(emsx, blotter, pcm, tradefile, findings, qty_tol=0, price_tol=0.01,
-              goldman_brokers=DEFAULT_GOLDMAN_BROKERS):
-    """Run all cross-source checks on already-loaded DataFrames; returns the report."""
+              goldman_brokers=DEFAULT_GOLDMAN_BROKERS,
+              pcm_excluded_emsx_brokers=EMSX_PCM_EXCLUDED_BROKERS):
+    """Run the four-step workflow on already-loaded DataFrames; returns the report.
+
+    Step 1: EMSX (brokers GSPT/PREX/GSOP) vs Goldman tradefile, bidirectional.
+    Step 2: EMSX (excluding TDAI)         vs PCM, bidirectional.
+    Step 3: PCM  (brokers GSPT/PREX/GSOP) vs Goldman tradefile, bidirectional.
+    Step 4: Blotter EOD adjudication of the discrepancies from steps 1-3.
+    """
+    goldman_brokers = {str(b).strip().upper() for b in goldman_brokers}
+    pcm_excluded = {str(b).strip().upper() for b in pcm_excluded_emsx_brokers}
+
     sedol_map = resolve_sedols(tradefile["sedol"].unique().tolist(), emsx, findings)
     tradefile = tradefile.assign(ticker=tradefile["sedol"].map(sedol_map))
     tradefile = tradefile[tradefile["ticker"].notna()]
@@ -628,13 +749,34 @@ def reconcile(emsx, blotter, pcm, tradefile, findings, qty_tol=0, price_tol=0.01
     check_crosses(pcm_x, "PCM", findings)
     compare_crosses(blotter_x, pcm_x, findings)
 
-    emsx_agg = aggregate(emsx)
-    # The tradefile only carries Goldman-custodied executions.
-    emsx_goldman_agg = aggregate(emsx[emsx["broker"].isin(goldman_brokers)])
+    tradefile_agg = aggregate(tradefile)
+    pcm_agg = aggregate(pcm)
 
-    compare_source(emsx_agg, blotter, "Blotter", findings, qty_tol, price_tol)
-    compare_source(emsx_agg, pcm, "PCM", findings, qty_tol, price_tol)
-    compare_source(emsx_goldman_agg, tradefile, "Tradefile", findings, qty_tol, price_tol)
+    # Step 1: EMSX Goldman scope vs tradefile.
+    emsx_goldman_agg = aggregate(emsx[emsx["broker"].isin(goldman_brokers)])
+    step1 = compare_pair(emsx_goldman_agg, tradefile_agg, "EMSX", "Tradefile",
+                         qty_tol, price_tol)
+
+    # Step 2: EMSX without TDAI vs PCM.
+    emsx_no_tdai_agg = aggregate(emsx[~emsx["broker"].isin(pcm_excluded)])
+    step2 = compare_pair(emsx_no_tdai_agg, pcm_agg, "EMSX", "PCM",
+                         qty_tol, price_tol)
+
+    # Step 3: Goldman-scope PCM vs tradefile.
+    pcm_goldman_agg = aggregate(pcm[pcm["broker"].isin(goldman_brokers)])
+    step3 = compare_pair(pcm_goldman_agg, tradefile_agg, "PCM", "Tradefile",
+                         qty_tol, price_tol)
+
+    # Step 4: adjudicate discrepancies against the Blotter EOD, scoped like the
+    # comparison that produced them.
+    blotter_goldman_agg = aggregate(blotter[blotter["broker"].isin(goldman_brokers)])
+    blotter_no_tdai_agg = aggregate(blotter[~blotter["broker"].isin(pcm_excluded)])
+    adjudicate_with_blotter(step1, emsx_goldman_agg, tradefile_agg, blotter_goldman_agg,
+                            "EMSX", "Tradefile", "Step 1", findings, qty_tol)
+    adjudicate_with_blotter(step2, emsx_no_tdai_agg, pcm_agg, blotter_no_tdai_agg,
+                            "EMSX", "PCM", "Step 2", findings, qty_tol)
+    adjudicate_with_blotter(step3, pcm_goldman_agg, tradefile_agg, blotter_goldman_agg,
+                            "PCM", "Tradefile", "Step 3", findings, qty_tol)
 
     return findings.to_frame()
 
@@ -647,7 +789,7 @@ def run(emsx_path, blotter_path, pcm_path, tradefile_path, out_path, qty_tol, pr
         goldman_brokers=DEFAULT_GOLDMAN_BROKERS):
     findings = Findings()
 
-    print(f"Loading EMSX (authoritative): {emsx_path}")
+    print(f"Loading EMSX: {emsx_path}")
     emsx = load_emsx(emsx_path, findings)
     print(f"  {len(emsx)} filled EMSX rows, {emsx['ticker'].nunique()} tickers")
 
@@ -670,13 +812,15 @@ def run(emsx_path, blotter_path, pcm_path, tradefile_path, out_path, qty_tol, pr
     print("\n" + "=" * 70)
     n_err = (report["severity"] == "ERROR").sum()
     n_warn = (report["severity"] == "WARN").sum()
-    print(f"RESULT: {n_err} error(s), {n_warn} warning(s)  ->  {out_path}")
+    n_resolved = (report["severity"] == "RESOLVED").sum()
+    print(f"RESULT: {n_err} error(s), {n_warn} warning(s), "
+          f"{n_resolved} resolved by blotter  ->  {out_path}")
     print("=" * 70)
     if not report.empty:
         with pd.option_context("display.max_rows", None, "display.max_colwidth", 90, "display.width", 250):
             print(report.to_string(index=False))
     else:
-        print("All sources reconcile against EMSX. No differences found.")
+        print("All comparisons reconcile. No differences found.")
 
     return report
 
@@ -685,7 +829,7 @@ def main():
     # Windows consoles default to cp1252; keep report text printable regardless.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     p = argparse.ArgumentParser(description="Reconcile EOD trade files against the EMSX export.")
-    p.add_argument("--emsx", required=True, help="EMSX grid export (.xlsx) - authoritative")
+    p.add_argument("--emsx", required=True, help="EMSX grid export (.xlsx)")
     p.add_argument("--blotter", required=True, help="Vantage BlotterEOD (.xlsx or .csv)")
     p.add_argument("--pcm", required=True, help="PCMBlotter (.csv)")
     p.add_argument("--tradefile", required=True, help="Goldman tradefile.nine82 (.csv, pipe-delimited)")
@@ -693,7 +837,7 @@ def main():
     p.add_argument("--qty-tol", type=int, default=0, help="Allowed share difference before flagging (default 0)")
     p.add_argument("--price-tol", type=float, default=0.01, help="Allowed absolute price difference (default 0.01)")
     p.add_argument("--goldman-brokers", default=",".join(sorted(DEFAULT_GOLDMAN_BROKERS)),
-                   help="Comma-separated EMSX broker codes in scope for the tradefile comparison")
+                   help="Comma-separated Goldman broker codes for the tradefile/PCM Goldman scopes")
     args = p.parse_args()
 
     out = args.out or f"blottercheck_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
