@@ -4,6 +4,6 @@ flask>=3.0
 pandas-market-calendars>=4.0
 python-calamine>=0.2
 pytz>=2024.1
-# Optional: only needed if a SEDOL is missing from both the EMSX file and the
-# Backtester security master (requires a running Bloomberg terminal):
-# xbbg>=0.7
+# Bloomberg-backed SEDOL lookup and column-D ticker validation. These features
+# require a running Bloomberg terminal.
+xbbg>=0.7

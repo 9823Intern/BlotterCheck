@@ -162,6 +162,7 @@
       <button class="tab active" data-tab="errors">Trade Errors</button>
       <button class="tab" data-tab="crosses">Crossing Trades</button>
       <button class="tab" data-tab="accounts">Fund / Broker / Account</button>
+      <button class="tab" data-tab="tickers">Ticker Validation</button>
     </div>
 
     <div class="card">
@@ -232,6 +233,13 @@
         render: renderAccounts,
         running: "Checking fund/broker/account combinations...",
         button: "Run check",
+      },
+      tickers: {
+        endpoint: "/tickers",
+        sub: "Count unique tickers in column D and validate them through Bloomberg. Drop a blotter file or paste an Excel grid.",
+        render: renderTickers,
+        running: "Validating unique tickers with Bloomberg...",
+        button: "Validate tickers",
       },
     };
 
@@ -415,6 +423,36 @@
             <thead>
               <tr><th>Ticker</th><th>Fund (S)</th><th>Broker (L)</th><th>Account (T)</th><th>Issue</th></tr>
             </thead>
+            <tbody>${body}</tbody>
+          </table>`;
+      }
+      resultBody.innerHTML = html;
+    }
+
+    function renderTickers(data) {
+      results.classList.remove("hidden");
+      const s = data.summary;
+      summary.innerHTML = `
+        <div class="stat"><div class="n">${s.unique}</div><div class="l">Unique tickers</div></div>
+        <div class="stat"><div class="n">${s.valid}</div><div class="l">Valid</div></div>
+        <div class="stat ${s.invalid ? "danger" : ""}"><div class="n">${s.invalid}</div><div class="l">Invalid</div></div>`;
+
+      let html = `<div class="sub">Source: <span class="mono">${escapeHtml(data.source)}</span> &middot; skiprows=${escapeHtml(data.skiprows)}</div>`;
+      if (!s.invalid) {
+        html += `<div class="empty">All unique column-D tickers are valid Bloomberg securities.</div>`;
+      } else {
+        html += `<div class="group-title danger">Invalid Bloomberg tickers</div>`;
+        const body = data.invalid_tickers
+          .map(
+            (ticker) => `
+            <tr class="danger">
+              <td class="mono">${escapeHtml(ticker)}</td>
+            </tr>`
+          )
+          .join("");
+        html += `
+          <table>
+            <thead><tr><th>Ticker</th></tr></thead>
             <tbody>${body}</tbody>
           </table>`;
       }

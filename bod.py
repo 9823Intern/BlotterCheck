@@ -12,6 +12,7 @@ then open http://127.0.0.1:5051 in a browser.
 
 from __future__ import annotations
 
+import inspect
 import traceback
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -25,6 +26,8 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB upload cap
 
 EXCEL_EXTS = {".xlsx", ".xls", ".xlsm", ".xlsb"}
+TICKER_COLUMN_INDEX = 3  # Excel column D
+TICKER_VALIDATION_FIELD = "MARKET_STATUS"
 
 
 def _read_excel_bytes(data: bytes, skiprows: int) -> pd.DataFrame:
@@ -89,6 +92,94 @@ def _requested_skiprows() -> int:
         return int(request.form.get("skiprows", new_main.BLOTTER_SKIPROWS))
     except (TypeError, ValueError):
         return new_main.BLOTTER_SKIPROWS
+
+
+def unique_tickers(blotter_df: pd.DataFrame) -> list[str]:
+    """Return non-blank column-D tickers in first-seen order."""
+    if blotter_df.shape[1] <= TICKER_COLUMN_INDEX:
+        raise ValueError("The blotter does not contain column D.")
+
+    tickers = (
+        str(value).strip()
+        for value in blotter_df.iloc[:, TICKER_COLUMN_INDEX]
+        if not pd.isna(value)
+    )
+    return list(dict.fromkeys(ticker for ticker in tickers if ticker))
+
+
+def invalid_bloomberg_tickers(tickers: list[str]) -> list[str]:
+    """Return tickers rejected by Bloomberg through an xbbg BDP request."""
+    if not tickers:
+        return []
+
+    try:
+        from xbbg import blp
+    except ImportError as exc:
+        raise RuntimeError(
+            "xbbg is not installed; install it to run ticker validation."
+        ) from exc
+
+    # Bloomberg requires a yellow key for bare equity symbols (for example,
+    # "AAPL US Equity", not "AAPL"). Preserve identifiers that already include
+    # one, such as options or non-equity securities.
+    requested_securities = [
+        ticker if " " in ticker else f"{ticker} US Equity"
+        for ticker in tickers
+    ]
+
+    # xbbg 0.x omits rejected securities from BDP results. xbbg 1.x can return
+    # explicit security-error rows; force pandas/long output there so global
+    # backend settings cannot change the response schema.
+    request_options = {}
+    if "include_security_errors" in inspect.signature(blp.bdp).parameters:
+        request_options.update({
+            "include_security_errors": True,
+            "backend": "pandas",
+            "format": "long",
+        })
+
+    response = blp.bdp(
+        tickers=requested_securities,
+        flds=TICKER_VALIDATION_FIELD,
+        **request_options,
+    )
+
+    if not isinstance(response, pd.DataFrame):
+        if hasattr(response, "to_pandas"):
+            response = response.to_pandas()
+        else:
+            response = pd.DataFrame(response)
+
+    market_statuses = {}
+    if {"ticker", "field", "value"}.issubset(response.columns):
+        status_rows = response[
+            response["field"].astype(str).str.upper()
+            == TICKER_VALIDATION_FIELD
+        ]
+        market_statuses = {
+            str(row["ticker"]).strip().casefold(): str(row["value"]).upper()
+            for _, row in status_rows.iterrows()
+        }
+    else:
+        status_column = next(
+            (
+                column
+                for column in response.columns
+                if str(column).upper() == TICKER_VALIDATION_FIELD
+            ),
+            None,
+        )
+        if status_column is not None:
+            market_statuses = {
+                str(ticker).strip().casefold(): str(status).upper()
+                for ticker, status in response[status_column].items()
+            }
+
+    return [
+        ticker
+        for ticker, security in zip(tickers, requested_securities)
+        if market_statuses.get(security.casefold()) != "ACTV"
+    ]
 
 
 @app.route("/check", methods=["POST"])
@@ -208,6 +299,44 @@ def accounts():
         "skiprows": skiprows,
         "summary": {"total": len(issues)},
         "issues": issues,
+    })
+
+
+@app.route("/tickers", methods=["POST"])
+def tickers():
+    skiprows = _requested_skiprows()
+
+    try:
+        blotter_df, source = _read_request_blotter(skiprows)
+        requested_tickers = unique_tickers(blotter_df)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001 - surface parse errors to the UI
+        return jsonify({
+            "ok": False,
+            "error": f"Could not read the blotter input: {exc}",
+            "detail": traceback.format_exc(),
+        }), 400
+
+    try:
+        invalid_tickers = invalid_bloomberg_tickers(requested_tickers)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({
+            "ok": False,
+            "error": f"Bloomberg ticker validation failed: {exc}",
+            "detail": traceback.format_exc(),
+        }), 500
+
+    return jsonify({
+        "ok": True,
+        "source": source,
+        "skiprows": skiprows,
+        "summary": {
+            "unique": len(requested_tickers),
+            "valid": len(requested_tickers) - len(invalid_tickers),
+            "invalid": len(invalid_tickers),
+        },
+        "invalid_tickers": invalid_tickers,
     })
 
 
