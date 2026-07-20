@@ -444,15 +444,17 @@
         html += `<div class="group-title danger">Invalid Bloomberg tickers</div>`;
         const body = data.invalid_tickers
           .map(
-            (ticker) => `
+            (entry) => `
             <tr class="danger">
-              <td class="mono">${escapeHtml(ticker)}</td>
+              <td class="mono">${escapeHtml(entry.ticker)}</td>
+              <td class="mono">${escapeHtml(entry.market_status)}</td>
+              <td class="mono">${escapeHtml(entry.new_ticker || "—")}</td>
             </tr>`
           )
           .join("");
         html += `
           <table>
-            <thead><tr><th>Ticker</th></tr></thead>
+            <thead><tr><th>Ticker</th><th>Market Status</th><th>Current Ticker</th></tr></thead>
             <tbody>${body}</tbody>
           </table>`;
       }

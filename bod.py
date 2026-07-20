@@ -27,7 +27,10 @@ app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB upload cap
 
 EXCEL_EXTS = {".xlsx", ".xls", ".xlsm", ".xlsb"}
 TICKER_COLUMN_INDEX = 3  # Excel column D
-TICKER_VALIDATION_FIELD = "MARKET_STATUS"
+TICKER_VALIDATION_FIELDS = (
+    "MARKET_STATUS",
+    "EQY_PRIM_SECURITY_TICKER",
+)
 
 
 def _read_excel_bytes(data: bytes, skiprows: int) -> pd.DataFrame:
@@ -107,8 +110,8 @@ def unique_tickers(blotter_df: pd.DataFrame) -> list[str]:
     return list(dict.fromkeys(ticker for ticker in tickers if ticker))
 
 
-def invalid_bloomberg_tickers(tickers: list[str]) -> list[str]:
-    """Return tickers rejected by Bloomberg through an xbbg BDP request."""
+def invalid_bloomberg_tickers(tickers: list[str]) -> list[dict]:
+    """Return inactive tickers with Bloomberg status and replacement ticker."""
     if not tickers:
         return []
 
@@ -140,7 +143,7 @@ def invalid_bloomberg_tickers(tickers: list[str]) -> list[str]:
 
     response = blp.bdp(
         tickers=requested_securities,
-        flds=TICKER_VALIDATION_FIELD,
+        flds=list(TICKER_VALIDATION_FIELDS),
         **request_options,
     )
 
@@ -150,36 +153,39 @@ def invalid_bloomberg_tickers(tickers: list[str]) -> list[str]:
         else:
             response = pd.DataFrame(response)
 
-    market_statuses = {}
+    security_values: dict[str, dict[str, str]] = {}
     if {"ticker", "field", "value"}.issubset(response.columns):
-        status_rows = response[
-            response["field"].astype(str).str.upper()
-            == TICKER_VALIDATION_FIELD
-        ]
-        market_statuses = {
-            str(row["ticker"]).strip().casefold(): str(row["value"]).upper()
-            for _, row in status_rows.iterrows()
-        }
+        for _, row in response.iterrows():
+            field = str(row["field"]).upper()
+            if field in TICKER_VALIDATION_FIELDS:
+                security = str(row["ticker"]).strip().casefold()
+                security_values.setdefault(security, {})[field] = str(
+                    row["value"]
+                ).strip()
     else:
-        status_column = next(
-            (
-                column
-                for column in response.columns
-                if str(column).upper() == TICKER_VALIDATION_FIELD
-            ),
-            None,
-        )
-        if status_column is not None:
-            market_statuses = {
-                str(ticker).strip().casefold(): str(status).upper()
-                for ticker, status in response[status_column].items()
+        columns_by_field = {
+            str(column).upper(): column
+            for column in response.columns
+            if str(column).upper() in TICKER_VALIDATION_FIELDS
+        }
+        for security, row in response.iterrows():
+            security_values[str(security).strip().casefold()] = {
+                field: str(row[column]).strip()
+                for field, column in columns_by_field.items()
+                if not pd.isna(row[column])
             }
 
-    return [
-        ticker
-        for ticker, security in zip(tickers, requested_securities)
-        if market_statuses.get(security.casefold()) != "ACTV"
-    ]
+    invalid_tickers = []
+    for ticker, security in zip(tickers, requested_securities):
+        values = security_values.get(security.casefold(), {})
+        market_status = values.get("MARKET_STATUS", "INVALID").upper()
+        if market_status != "ACTV":
+            invalid_tickers.append({
+                "ticker": ticker,
+                "market_status": market_status,
+                "new_ticker": values.get("EQY_PRIM_SECURITY_TICKER", ""),
+            })
+    return invalid_tickers
 
 
 @app.route("/check", methods=["POST"])
