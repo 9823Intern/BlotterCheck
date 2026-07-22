@@ -151,6 +151,11 @@
     }
     .tab:hover { color: var(--text); background: transparent; }
     .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .resolve-actions {
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border);
+    }
+    .resolve-note { color: var(--muted); font-size: 0.82rem; }
   </style>
 </head>
 <body>
@@ -456,9 +461,100 @@
           <table>
             <thead><tr><th>Ticker</th><th>Market Status</th><th>Current Ticker</th></tr></thead>
             <tbody>${body}</tbody>
-          </table>`;
+          </table>
+          <div class="resolve-actions">
+            <button id="resolveSecurityMasterBtn">Resolve Security Master</button>
+            <span class="resolve-note">Automatically applies TKCH ticker changes only. Other cases require manual review.</span>
+          </div>
+          <div id="resolveSecurityMasterStatus" class="status"></div>`;
       }
       resultBody.innerHTML = html;
+      if (s.invalid) {
+        document
+          .getElementById("resolveSecurityMasterBtn")
+          .addEventListener(
+            "click",
+            () => resolveSecurityMaster(data.invalid_tickers)
+          );
+      }
+    }
+
+    async function resolveSecurityMaster(invalidTickers) {
+      const button = document.getElementById("resolveSecurityMasterBtn");
+      const status = document.getElementById("resolveSecurityMasterStatus");
+      const confirmed = window.confirm(
+        "This will update the shared production Security Master for unambiguous Bloomberg ticker changes. Continue?"
+      );
+      if (!confirmed) return;
+
+      button.disabled = true;
+      status.className = "status";
+      status.textContent = "Rechecking Bloomberg and resolving Security Master rows...";
+
+      try {
+        const response = await fetch("/resolve-security-master", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tickers: invalidTickers.map((entry) => entry.ticker),
+          }),
+        });
+        const data = await response.json();
+        if (!data.ok) {
+          throw new Error(data.error || "Security Master resolution failed.");
+        }
+
+        status.className = "status ok";
+        status.textContent =
+          `Resolved ${data.summary.resolved}; updated ${data.summary.updated}; ` +
+          `already current ${data.summary.already_current}; skipped ${data.summary.skipped}.`;
+        button.textContent = "Security Master Checked";
+
+        let detailHtml = "";
+        if (data.resolved.length) {
+          const resolvedRows = data.resolved
+            .map(
+              (entry) => `
+              <tr>
+                <td class="mono">${escapeHtml(entry.ticker)}</td>
+                <td class="mono">${escapeHtml(entry.new_ticker)}</td>
+                <td class="mono">${escapeHtml(entry.security_key)}</td>
+                <td>${escapeHtml(
+                  entry.status === "updated" ? "Updated" : "Already current"
+                )}</td>
+              </tr>`
+            )
+            .join("");
+          detailHtml += `
+            <div class="group-title">Security Master results</div>
+            <table>
+              <thead><tr><th>Old Ticker</th><th>Primary Ticker</th><th>Security Key</th><th>Result</th></tr></thead>
+              <tbody>${resolvedRows}</tbody>
+            </table>`;
+        }
+        if (data.skipped.length) {
+          const skippedRows = data.skipped
+            .map(
+              (entry) => `
+              <tr class="danger">
+                <td class="mono">${escapeHtml(entry.ticker)}</td>
+                <td>${escapeHtml(entry.reason)}</td>
+              </tr>`
+            )
+            .join("");
+          detailHtml += `
+            <div class="group-title danger">Manual review required</div>
+            <table>
+              <thead><tr><th>Ticker</th><th>Reason</th></tr></thead>
+              <tbody>${skippedRows}</tbody>
+            </table>`;
+        }
+        status.insertAdjacentHTML("afterend", detailHtml);
+      } catch (error) {
+        status.className = "status err";
+        status.textContent = "Error: " + error.message;
+        button.disabled = false;
+      }
     }
 
     function escapeHtml(value) {

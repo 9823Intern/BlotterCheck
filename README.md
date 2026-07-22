@@ -3,6 +3,8 @@
 Beginning-of-day trade safety checks and end-of-day reconciliation in one
 project.
 
+## Table guide available in BlotterCheck guide.docx
+
 ## Beginning-of-day safety check
 
 ```bash
